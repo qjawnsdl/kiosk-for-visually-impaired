@@ -1,17 +1,15 @@
 package com.example.bus1;
 
-import static android.content.Intent.*;
-
-import android.content.Context;
+import android.Manifest;
 import android.content.Intent;
-import android.media.AudioManager;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.os.Handler;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.util.Log;
-import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -20,56 +18,106 @@ import androidx.camera.core.ExperimentalGetImage;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import com.example.bus1.R;
+
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.pose.PoseDetection;
 import com.google.mlkit.vision.pose.PoseDetector;
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions;
 
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+import org.xml.sax.InputSource;
+
+import java.io.StringReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 
-
-//import com.google.gson.Gson;
-//import com.google.gson.JsonObject;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
 
 @ExperimentalGetImage
 public class MainActivity extends AppCompatActivity {
 
+    private static final String TAG = "Bus1";
+
     private TextToSpeech textToSpeech;
-    private PoseDetector poseDetector;  // ML Kit 포즈 감지기
+    private PoseDetector poseDetector;
     private SpeechRecognizer speechRecognizer;
+
     private boolean isPersonDetected = false;
-    private boolean isQuestionAsked = false;
-    private boolean isListening = false;
-    private ImageAnalysis imageAnalysis;
+    private boolean isUserInSession = false;
     private boolean isBusNumberRequested = false;
-    //private processBusNumber =
+
+    private Handler timeoutHandler = new Handler();
+    private Runnable timeoutRunnable;
+
+    private static final String API_KEY = "39LvkKBDQ3ntFTS50jGpUGMSkfUC7tNdr%2FeaiK8tHCbtwAfGL%2BXaBpluvSHRUtnGlj%2FT94eglPA6l1qpSvQ6GA%3D%3D";  // 실제 API 키로 대체하세요
+    private static final String STOP_ID = "124000414";     // 정류장 ID
+
+    private static final int PERMISSION_REQUEST_CODE = 100;
+
+    private static final int LISTENING_TIMEOUT = 10000; // 10초
+    private static final int BUS_NUMBER_LISTENING_TIME = 5000; // 5초
+    private static final int RETRY_DELAY = 2000; // 2초
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        // 권한 요청
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                        != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.INTERNET)
+                        != PackageManager.PERMISSION_GRANTED) {
+
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA, Manifest.permission.INTERNET},
+                    PERMISSION_REQUEST_CODE);
+        } else {
+            initializeComponents();  // 권한이 있으면 초기화 진행
+        }
+    }
+
+    // 권한 요청 결과 처리
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);  // 상위 클래스 메서드 호출
+
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            boolean permissionsGranted = true;
+            for (int result : grantResults) {
+                permissionsGranted &= (result == PackageManager.PERMISSION_GRANTED);
+            }
+            if (permissionsGranted) {
+                initializeComponents();  // 권한이 허용되면 초기화 진행
+            } else {
+                // 권한이 거부되었을 경우 처리
+                finish();
+            }
+        }
+    }
+
+    private void initializeComponents() {
         // TextToSpeech 초기화
         textToSpeech = new TextToSpeech(this, status -> {
             if (status == TextToSpeech.SUCCESS) {
-                int langResult = textToSpeech.setLanguage(Locale.KOREAN);
-                if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    Log.e("TextToSpeech", "Language not supported or missing data");
-                } else {
-                    Log.i("TextToSpeech", "Language set to Korean successfully");
-                }
-            } else {
-                Log.e("TextToSpeech", "Initialization failed");
+                textToSpeech.setLanguage(Locale.KOREAN);
+                startCamera();
             }
         });
 
-        // ML Kit의 포즈 감지 옵션 설정 (빠르고 경량화된 기본 감지 옵션 사용)
+        // PoseDetector 초기화
         PoseDetectorOptions options = new PoseDetectorOptions.Builder()
                 .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
                 .build();
@@ -78,9 +126,6 @@ public class MainActivity extends AppCompatActivity {
         // SpeechRecognizer 초기화
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
         speechRecognizer.setRecognitionListener(new SpeechRecognitionListener());
-
-        // 카메라 초기화
-        startCamera();
     }
 
     private void startCamera() {
@@ -89,111 +134,184 @@ public class MainActivity extends AppCompatActivity {
         cameraProviderFuture.addListener(() -> {
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-                bindPreview(cameraProvider);
+                bindAnalysis(cameraProvider);
             } catch (ExecutionException | InterruptedException e) {
-                Log.e("CameraX", "Camera initialization failed", e);
+                Log.e(TAG, "Camera initialization failed", e);
             }
         }, ContextCompat.getMainExecutor(this));
     }
 
-    private void bindPreview(@NonNull ProcessCameraProvider cameraProvider) {
-        // CameraX 프리뷰 설정
+    private void bindAnalysis(@NonNull ProcessCameraProvider cameraProvider) {
         CameraSelector cameraSelector = new CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_FRONT)  // 전면 캠 사용
+                .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
                 .build();
 
-        imageAnalysis = new ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
                 .build();
 
-        // 실시간 프레임 분석
         imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(this), imageProxy -> {
-            if (!isQuestionAsked) {
-                detectPoseFromImage(imageProxy);  // 이미지 분석 및 포즈 감지
+            if (!isUserInSession) {
+                detectPoseFromImage(imageProxy);
+            } else {
+                imageProxy.close();
             }
         });
 
-        cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis);  // CameraX 바인딩
+        cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis);
     }
 
-    // ML Kit을 사용하여 이미지에서 포즈 감지
     private void detectPoseFromImage(ImageProxy imageProxy) {
-        @NonNull InputImage image = InputImage.fromMediaImage(imageProxy.getImage(), imageProxy.getImageInfo().getRotationDegrees());
+        if (imageProxy == null || imageProxy.getImage() == null) {
+            imageProxy.close();
+            return;
+        }
+
 
         poseDetector.process(image)
-                .addOnSuccessListener(pose -> runOnUiThread(() -> {
-                    // 포즈 분석 성공
-                    if (!isPersonDetected && pose.getAllPoseLandmarks().size() > 0 && !isQuestionAsked) {
-                        isPersonDetected = true;  // 사람이 감지되었음을 표시
-                        askQuestion();  // 질문을 던진다
+                .addOnSuccessListener(pose -> {
+                    if (!isPersonDetected && pose.getAllPoseLandmarks().size() > 0) {
+                        isPersonDetected = true;
+                        isUserInSession = true;
+                        askIfVisuallyImpaired();
                     } else if (pose.getAllPoseLandmarks().size() == 0) {
-                        isPersonDetected = false;  // 사람이 감지되지 않음
+                        isPersonDetected = false;
                     }
-                }))
-                .addOnFailureListener(e -> Log.e("Pose Detection", "Error detecting pose", e))
-                .addOnCompleteListener(task -> imageProxy.close());  // 이미지 분석 후 리소스 해제
+                })
+                .addOnFailureListener(e -> Log.e(TAG, "Pose detection error", e))
+                .addOnCompleteListener(task -> imageProxy.close());
     }
 
-    private void askQuestion() {
-        // 질문을 음성으로 출력
+    private void askIfVisuallyImpaired() {
         speak("시각장애인 이신가요?");
-        isQuestionAsked = true;  // 질문을 던졌으므로 플래그 설정
-
-        // 음성 인식 시작
-        startListening();
+        startListeningWithTimeout(LISTENING_TIMEOUT);
     }
 
-    private void startListening() {
-        if (!isListening) {
-            isListening = true;
-            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "응답을 말해 주세요");
-            speechRecognizer.startListening(intent);
-        }
+    private void askForBusNumber() {
+        speak("이용하실 버스 번호를 말씀해주세요.");
+        isBusNumberRequested = true;
+        startListeningWithTimeout(BUS_NUMBER_LISTENING_TIME);
     }
 
-    private void stopListening() {
-        if (isListening) {
-            isListening = false;
+    private void startListeningWithTimeout(int timeout) {
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.KOREAN.toString());
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        speechRecognizer.startListening(intent);
+
+        // 타임아웃 설정
+        timeoutHandler.removeCallbacksAndMessages(null);
+        timeoutRunnable = () -> {
             speechRecognizer.stopListening();
-        }
+            resetSession();
+        };
+        timeoutHandler.postDelayed(timeoutRunnable, timeout);
     }
 
-    private void handleUserResponse(String response) {
-        if (response != null) {
-            response = response.toLowerCase();  // 사용자가 말한 응답을 소문자로 변환
-            if (!isBusNumberRequested) {
-                // 시각장애인 여부에 대한 응답 처리
-                if (response.contains("예")) {
-                    speak("이용하실 버스 번호를 말씀해주세요.");
-                    isBusNumberRequested = true;  // 버스 번호 요청 상태로 전환
-                    isQuestionAsked = false;
-                } else if (response.contains("아니요")) {
-//                    speak("이 키오스크는 시각장애인 전용입니다.");
-                    isQuestionAsked = false;
-                } else {
-                    speak("죄송합니다. 이해하지 못했습니다.");
-                    isQuestionAsked = false;
-                }
-            } else {
-                // 사용자가 말한 버스 번호 처리
-//                processBusNumber(response);  // 버스 번호에 따라 정보를 처리하는 메서드 호출
-            }
-        } else {
-            speak("응답을 인식할 수 없습니다.");
-        }
-        stopListening();  // 음성 인식을 중지
+    private void resetSession() {
+        isUserInSession = false;
+        isBusNumberRequested = false;
+        isPersonDetected = false;
+        timeoutHandler.removeCallbacksAndMessages(null);
+        // 처음으로 돌아감
     }
 
-    // TextToSpeech를 통해 음성을 출력하는 메서드
     private void speak(String text) {
-        Log.i("TextToSpeech", "Attempting to speak: " + text);
-        if (textToSpeech != null) {
-            textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, null);
-        } else {
-            Log.e("TextToSpeech", "TextToSpeech instance is null");
+        textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, "TTS_ID");
+    }
+
+    // 버스 번호로부터 버스 노선 ID를 얻는 메서드
+    private String getBusRouteId(String busNumber) throws Exception {
+        String urlStr = "http://ws.bus.go.kr/api/rest/busRouteInfo/getBusRouteList?serviceKey=" + API_KEY + "&strSrch=" + busNumber;
+
+        URL url = new URL(urlStr);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
+
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        InputSource is = new InputSource(new StringReader(convertStreamToString(connection.getInputStream())));
+        Document doc = builder.parse(is);
+
+        NodeList itemList = doc.getElementsByTagName("itemList");
+        for (int i = 0; i < itemList.getLength(); i++) {
+            Element item = (Element) itemList.item(i);
+            String busRouteNm = item.getElementsByTagName("busRouteNm").item(0).getTextContent();
+            if (busRouteNm.equals(busNumber)) {
+                String busRouteId = item.getElementsByTagName("busRouteId").item(0).getTextContent();
+                connection.disconnect();
+                return busRouteId;
+            }
         }
+        connection.disconnect();
+        return null;
+    }
+
+    // 버스 도착 정보를 가져오는 메서드
+    private void getBusArrivalInfo(String busNumber) {
+        new Thread(() -> {
+            try {
+                String busRouteId = getBusRouteId(busNumber);
+                if (busRouteId == null) {
+                    runOnUiThread(() -> {
+                        speak("죄송합니다, 버스 번호 인식에 실패하였습니다.");
+                        retryAfterDelay();
+                    });
+                    return;
+                }
+
+                String urlStr = "http://ws.bus.go.kr/api/rest/arrive/getArrInfoByRouteAll?serviceKey=" + API_KEY + "&busRouteId=" + busRouteId;
+
+                URL url = new URL(urlStr);
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+
+                DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+                DocumentBuilder builder = factory.newDocumentBuilder();
+                InputSource is = new InputSource(new StringReader(convertStreamToString(connection.getInputStream())));
+                Document doc = builder.parse(is);
+
+                NodeList itemList = doc.getElementsByTagName("itemList");
+                boolean found = false;
+                for (int i = 0; i < itemList.getLength(); i++) {
+                    Element item = (Element) itemList.item(i);
+                    String stId = item.getElementsByTagName("stId").item(0).getTextContent();
+                    if (stId.equals(STOP_ID)) {
+                        String busArriveTime = item.getElementsByTagName("arrmsg1").item(0).getTextContent();
+                        runOnUiThread(() -> {
+                            speak(busNumber + "번 버스는 " + busArriveTime + "에 도착합니다.");
+                            resetSession();
+                        });
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found) {
+                    runOnUiThread(() -> {
+                        speak("죄송합니다, 버스 번호 인식에 실패하였습니다.");
+                        retryAfterDelay();
+                    });
+                }
+
+                connection.disconnect();
+
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    speak("죄송합니다, 버스 번호 인식에 실패하였습니다.");
+                    retryAfterDelay();
+                });
+            }
+        }).start();
+    }
+
+    private void retryAfterDelay() {
+        new Handler().postDelayed(() -> askForBusNumber(), RETRY_DELAY);
+    }
+
+    // InputStream을 String으로 변환하는 메서드
+    private String convertStreamToString(java.io.InputStream is) {
+        java.util.Scanner s = new java.util.Scanner(is, "UTF-8").useDelimiter("\\A");
+        return s.hasNext() ? s.next() : "";
     }
 
     @Override
@@ -205,6 +323,7 @@ public class MainActivity extends AppCompatActivity {
         if (speechRecognizer != null) {
             speechRecognizer.destroy();
         }
+        timeoutHandler.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
 
@@ -212,12 +331,13 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onReadyForSpeech(Bundle params) {
-            Log.i("SpeechRecognizer", "Ready for speech");
+            Log.i(TAG, "Ready for speech");
         }
 
         @Override
         public void onBeginningOfSpeech() {
-            Log.i("SpeechRecognizer", "Speech beginning");
+            Log.i(TAG, "Speech beginning");
+            timeoutHandler.removeCallbacks(timeoutRunnable);  // 사용자가 말하기 시작하면 타임아웃 취소
         }
 
         @Override
@@ -232,23 +352,38 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onEndOfSpeech() {
-            Log.i("SpeechRecognizer", "Speech ended");
+            Log.i(TAG, "Speech ended");
         }
 
         @Override
         public void onError(int error) {
-            Log.e("SpeechRecognizer", "Error occurred: " + error);
-            stopListening();
+            Log.e(TAG, "Error occurred: " + error);
+            if (isBusNumberRequested) {
+                speak("죄송합니다, 버스 번호 인식에 실패하였습니다.");
+                retryAfterDelay();
+            } else {
+                resetSession();
+            }
         }
 
         @Override
         public void onResults(Bundle results) {
+            timeoutHandler.removeCallbacksAndMessages(null);  // 타임아웃 취소
             ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
             if (matches != null && !matches.isEmpty()) {
-                String response = matches.get(0);
-                handleUserResponse(response);  // 응답 처리
+                String response = matches.get(0).replaceAll("\\s+", "");
+                if (isBusNumberRequested) {
+                    getBusArrivalInfo(response);
+                } else {
+                    handleUserResponse(response);
+                }
             } else {
-                speak("응답을 인식할 수 없습니다.");
+                if (isBusNumberRequested) {
+                    speak("죄송합니다, 버스 번호 인식에 실패하였습니다.");
+                    retryAfterDelay();
+                } else {
+                    resetSession();
+                }
             }
         }
 
@@ -260,6 +395,18 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onEvent(int eventType, Bundle params) {
             // Do nothing
+        }
+    }
+
+    private void handleUserResponse(String response) {
+        response = response.toLowerCase().replaceAll("\\s+", "");
+        if (response.contains("예")) {
+            askForBusNumber();
+        } else if (response.contains("아니요")) {
+            speak("이 키오스크는 시각장애인을 위한 키오스크입니다.");
+            resetSession();
+        } else {
+            resetSession();
         }
     }
 }

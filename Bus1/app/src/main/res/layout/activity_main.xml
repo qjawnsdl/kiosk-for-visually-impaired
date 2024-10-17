@@ -31,7 +31,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="Initializing..."
-        app:layout_constraintBottom_toTopOf="@+id/button"
+        app:layout_constraintBottom_toTopOf="@+id/startButton"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
@@ -43,7 +43,7 @@
     <!-- 버튼 -->
 
     <Button
-        android:id="@+id/button"
+        android:id="@+id/startButton"
         android:layout_width="235dp"
         android:layout_height="56dp"
         android:layout_marginBottom="16dp"
