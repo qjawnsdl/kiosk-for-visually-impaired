@@ -5,13 +5,15 @@ import static android.content.Intent.*;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioManager;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.util.Log;
-import android.widget.Toast;
+import android.widget.Button;
+import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -21,6 +23,9 @@ import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.core.content.ContextCompat;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import com.example.myapplication.R;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -29,6 +34,13 @@ import com.google.mlkit.vision.pose.PoseDetection;
 import com.google.mlkit.vision.pose.PoseDetector;
 import com.google.mlkit.vision.pose.defaults.PoseDetectorOptions;
 
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserFactory;
+
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
@@ -44,10 +56,22 @@ public class MainActivity extends AppCompatActivity {
     private boolean isListening = false;
     private ImageAnalysis imageAnalysis;
 
+    TextView textView;
+
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        textView = findViewById(R.id.textView);
+
+
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main), (v, insets) -> {
+            Insets systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom);
+            return insets;
+        });
 
         // TextToSpeech 초기화
         textToSpeech = new TextToSpeech(this, status -> {
@@ -57,11 +81,15 @@ public class MainActivity extends AppCompatActivity {
                     Log.e("TextToSpeech", "Language not supported or missing data");
                 } else {
                     Log.i("TextToSpeech", "Language set to Korean successfully");
+                    // TextView의 텍스트를 음성으로 읽기
+                    speak(textView.getText().toString());
                 }
             } else {
                 Log.e("TextToSpeech", "Initialization failed");
             }
         });
+
+        // 버튼 클릭 리스너 설정
 
         // ML Kit의 포즈 감지 옵션 설정 (빠르고 경량화된 기본 감지 옵션 사용)
         PoseDetectorOptions options = new PoseDetectorOptions.Builder()
@@ -154,11 +182,16 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // 사용자가 "예"라고 응답하면 버튼의 기능을 대신 실행
     private void handleUserResponse(String response) {
         if (response != null) {
             response = response.toLowerCase();  // 응답을 소문자로 변환
-            if (response.contains("예")) {
-                speak("시작하겠습니다.");
+            if (response.contains("예") || response.contains("네")) {
+                speak("이용하실 버스 번호를 말씀해 주세요");
+
+                speak("버스 정보를 불러옵니다.");
+                Intent intent = new Intent(MainActivity.this, BusApiActivity.class);
+                startActivity(intent);
             } else if (response.contains("아니요")) {
                 speak("이 키오스크는 시각장애인 전용입니다.");
             } else {
@@ -167,7 +200,6 @@ public class MainActivity extends AppCompatActivity {
         } else {
             speak("응답을 인식할 수 없습니다.");
         }
-        // 질문 후 분석기를 다시 활성화
         isQuestionAsked = false;
         stopListening();
     }
